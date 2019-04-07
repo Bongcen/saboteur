@@ -98,7 +98,8 @@ public class GameLogicController {
 
     // Create new board and initialize goals
     game.setBoard(new Board());
-    List<GoalType> goals = Arrays.asList(GoalType.GOLD, GoalType.ROCK, GoalType.ROCK);
+    List<Board.InternalGoalType> goals =
+      Arrays.asList(Board.InternalGoalType.GOLD, Board.InternalGoalType.ROCK1, Board.InternalGoalType.ROCK2);
     Collections.shuffle(goals);
     game.board().initialize(goals.get(0), goals.get(1), goals.get(2));
 
@@ -126,7 +127,7 @@ public class GameLogicController {
       game.playerAt(i).initialize(i, roles.get(i), cardDistribution.get(i));
 
     game.players().forEach(p -> {
-      if(p instanceof AI) ((AI) p).initialize();
+      if (p instanceof AI) ((AI) p).initialize();
     });
   }
 
@@ -170,7 +171,7 @@ public class GameLogicController {
       broadcastGameFinished(winner);
       return;
     }
-    currentPlayer().hand().forEach(c -> {
+    currentPlayer().handShallowCopy().forEach(c -> {
       if (c instanceof PathCard) ((PathCard) c).setRotated(false);
     });
     game.incrementPlayerIndex();
@@ -190,6 +191,7 @@ public class GameLogicController {
     if (move.type() == Move.Type.DISCARD) {
       Card card = discardCard(move.playerIndex(), move.handIndex(), true);
       broadcastPlayerMove(move, card);
+      return;
     }
     Card card = playCard(move);
     broadcastPlayerMove(move, card);
@@ -237,19 +239,20 @@ public class GameLogicController {
     }
     // Get player's card
     Card card = playerAt(playerIndex).peekCardAt(handIndex);
+    StateDelta delta = null;
     switch (move.type()) {
       case PLAY_PATH:
         if (!(card instanceof PathCard)) {
           throw new GameException("Cannot create a path with a non path card");
         }
         ((PathCard) card).setRotated(args[2] == 1);
-        playPathCard(playerIndex, (PathCard) card, args[0], args[1]);
+        delta = playPathCard(playerIndex, (PathCard) card, args[0], args[1]);
         break;
       case PLAY_PLAYER:
         if (!(card instanceof PlayerActionCard)) {
           throw new GameException("Cannot block/repair another player with a non player-action card");
         }
-        playPlayerActionCard(playerIndex, (PlayerActionCard) card, args[0]);
+        delta = playPlayerActionCard(playerIndex, (PlayerActionCard) card, args[0]);
         break;
       case PLAY_MAP:
         if (card.type() != Card.Type.MAP) {
@@ -262,7 +265,7 @@ public class GameLogicController {
         if (card.type() != Card.Type.ROCKFALL) {
           throw new GameException("Cannot destroy a path with a non rockfall card");
         }
-        playRockfallCard(args[0], args[1]);
+        delta = playRockfallCard(args[0], args[1]);
         break;
       case DISCARD:
         break;
@@ -271,6 +274,8 @@ public class GameLogicController {
     }
     // Set move card reference
     move.setCard(card.copy());
+    // Set state delta
+    move.setDelta(delta);
     // Discard the played card
     return discardCard(playerIndex, handIndex, false);
   }
@@ -284,13 +289,14 @@ public class GameLogicController {
    * @param y           the target y position
    * @throws GameException when an invalid move is played
    */
-  private void playPathCard(int playerIndex, PathCard card, int x, int y) throws GameException {
+  private BoardDelta playPathCard(int playerIndex, PathCard card, int x, int y) throws GameException {
     Player p = game.playerAt(playerIndex);
     if (p.isSabotaged()) {
       String name = p.name();
       throw new GameException("%s is sabotaged and cannot place a path card", name);
     }
     game.board().placePathCardAt(card, x, y);
+    return new BoardDelta(new Position(x, y), null, card);
   }
 
   /**
@@ -301,9 +307,13 @@ public class GameLogicController {
    * @param targetIndex the targeted player
    * @throws GameException when an invalid move is applied
    */
-  private void playPlayerActionCard(int playerIndex, PlayerActionCard card, int targetIndex)
+  private PlayerDelta playPlayerActionCard(int playerIndex, PlayerActionCard card, int targetIndex)
     throws GameException {
+    if (targetIndex < 0 || targetIndex >= numPlayers()) {
+      throw new GameException("Invalid target player");
+    }
     Player p = game.players().get(targetIndex);
+    Tool[] oldSabotaged = p.sabotaged();
     if (card.type() == Card.Type.BLOCK) {
       if (playerIndex == targetIndex) {
         throw new GameException("Cannot sabotage self");
@@ -312,6 +322,8 @@ public class GameLogicController {
     } else if (card.type() == Card.Type.REPAIR) {
       p.repairTools(card.effects());
     }
+    Tool[] newSabotaged = p.sabotaged();
+    return new PlayerDelta(targetIndex, oldSabotaged, newSabotaged);
   }
 
   /**
@@ -331,8 +343,11 @@ public class GameLogicController {
    * @param y the targeted y position
    * @throws GameException when an invalid move is applied
    */
-  private void playRockfallCard(int x, int y) throws GameException {
+  private BoardDelta playRockfallCard(int x, int y) throws GameException {
+    Cell cell = game.board().cellAt(x, y);
+    Card oldCard = cell == null ? null : cell.card();
     game.board().removeCardAt(x, y);
+    return new BoardDelta(new Position(x, y), oldCard, null);
   }
 
   /**
@@ -344,7 +359,7 @@ public class GameLogicController {
   public final Player.Role checkEndGame() {
     if (game.board().isGoldReached())
       return Player.Role.GOLD_MINER;
-    if (game.deck().isEmpty() && game.players().stream().allMatch(player -> player.hand().isEmpty()))
+    if (game.deck().isEmpty() && game.players().stream().allMatch(player -> player.handSize() == 0))
       return Player.Role.SABOTEUR;
     return null;
   }
@@ -408,7 +423,7 @@ public class GameLogicController {
    * Broadcast to all observers that it is the next turn
    */
   private void broadcastNextTurn() {
-    ArrayList<Card> hand = new ArrayList<>(currentPlayer().hand());
+    ArrayList<Card> hand = currentPlayer().hand();
     nonPlayerObservers.forEach(o -> o.notifyNextPlayer(currentPlayerIndex(), currentPlayer().role(), hand));
   }
 
@@ -450,7 +465,7 @@ public class GameLogicController {
    * @param position the opened goal position
    */
   private void broadcastGoalOpened(Board.GoalPosition position) {
-    GoalType type = board().peekGoal(position);
+    GoalType type = board().openGoal(position);
     game.players().forEach(p -> p.notifyGoalOpen(position, type, true));
     nonPlayerObservers.forEach(o -> o.notifyGoalOpen(position, type, true));
   }
