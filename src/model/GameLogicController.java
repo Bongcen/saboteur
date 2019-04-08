@@ -187,7 +187,7 @@ public class GameLogicController {
    * @throws GameException when an invalid move is applied
    */
   public final void playMove(Move move) throws GameException {
-    if (move == null) return;
+    if (move == null) throw new GameException("Cannot execute null move");
     if (move.type() == Move.Type.DISCARD) {
       Card card = discardCard(move.playerIndex(), move.handIndex(), true);
       broadcastPlayerMove(move, card);
@@ -295,8 +295,10 @@ public class GameLogicController {
       String name = p.name();
       throw new GameException("%s is sabotaged and cannot place a path card", name);
     }
+    Board before = board().copy();
     game.board().placePathCardAt(card, x, y);
-    return new BoardDelta(new Position(x, y), null, card);
+    Board after = board().copy();
+    return new BoardDelta(new Position(x, y), null, card, before, after);
   }
 
   /**
@@ -346,8 +348,10 @@ public class GameLogicController {
   private BoardDelta playRockfallCard(int x, int y) throws GameException {
     Cell cell = game.board().cellAt(x, y);
     Card oldCard = cell == null ? null : cell.card();
+    Board before = board().copy();
     game.board().removeCardAt(x, y);
-    return new BoardDelta(new Position(x, y), oldCard, null);
+    Board after = board().copy();
+    return new BoardDelta(new Position(x, y), oldCard, null, before, after);
   }
 
   /**
